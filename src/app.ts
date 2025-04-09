@@ -22,7 +22,8 @@ async function main() {
         console.log('Creating VeyraX client...');
         const veyraxClient = new VeyraXClient(
             process.env.OPENAI_API_KEY || '',
-            process.env.VEYRAX_API_KEY || ''
+            process.env.VEYRAX_API_KEY || '',
+            process.env.USER_TIMEZONE || 'Asia/Singapore'
         );
 
         // Set up WhatsApp event handlers
@@ -32,15 +33,8 @@ async function main() {
             console.log('Scan the QR code above with WhatsApp');
         });
 
-        client.on('ready', async () => {
+        client.on('ready', () => {
             console.log('WhatsApp client is ready!');
-            try {
-                console.log('Initializing VeyraX tools...');
-                await veyraxClient.initializeTools();
-                console.log('VeyraX tools initialized successfully');
-            } catch (error) {
-                console.error('Failed to initialize VeyraX tools:', error);
-            }
         });
 
         client.on('message', async (message) => {
@@ -52,10 +46,7 @@ async function main() {
 
                 console.log('Received message:', message.body);
                 
-                const response = await veyraxClient.processMessage(
-                    message.from,
-                    message.body
-                );
+                const response = await veyraxClient.processMessage(message.body, message.from);
 
                 await message.reply(response);
             } catch (error) {
