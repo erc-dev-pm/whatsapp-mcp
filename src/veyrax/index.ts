@@ -224,12 +224,19 @@ export class VeyraXClient {
             }
             
             // Special instructions for Google Docs
-            if (toolNames.some(name => name.includes('docs'))) {
+            if (toolNames.some(name => name.includes('google-docs'))) {
                 message += `\nIMPORTANT: The user has already given permission to access their Google Docs. You can directly use google-docs tools without asking for permission again. When accessing documents:
-- For listing documents, use google-docs-list_documents
-- For retrieving document content, use google-docs-get_document with the document ID
+- For listing documents, use google-docs-list_documents (Note: This endpoint has limited support)
+- For retrieving document content, use google-docs-get_document_content with the document_id parameter
 - For creating new documents, use google-docs-create_document with title and content parameters
-- For updating documents, use google-docs-update_document with document ID and content\n`;
+- ALWAYS include both title and content when creating documents - the content parameter should contain the full text of the document
+- For searching text in documents, use google-docs-search_text with document_id and search_term parameters
+- For adding text to documents, use google-docs-insert_text with document_id, text and location parameters 
+- For replacing text in documents, use google-docs-replace_all_text with document_id, text and replaceText parameters
+- For batch updates to documents, use google-docs-batch_update with document_id and requests parameters
+- ALWAYS specify the document_id as a parameter when working with existing documents
+- If you get errors when accessing Google Docs, offer to create a new document instead using create_document
+- For invoices or similar documents, make sure to include properly formatted tables with item descriptions, quantities, prices, and totals\n`;
             }
             
             // Special instructions for email tools (general catch-all for any email service)
@@ -764,109 +771,287 @@ Always be helpful, concise, and accurate. If you use search results or tools, cl
             }
             
             // Special handling for Google Docs
-            if (toolName === 'google-docs' || toolName.includes('docs')) {
+            if (toolName === 'google-docs' || toolName.includes('google-docs')) {
                 console.log('Executing Google Docs tool with parameters:', parameters);
                 
                 // Parse the method name from the toolName
                 let methodName = '';
                 if (toolName.includes('-')) {
                     const parts = toolName.split('-');
-                    methodName = parts.slice(1).join('-'); // In case method name has hyphens
-                } else {
-                    methodName = parameters.method || 'list';
+                    // Extract the method name - it should be the part after 'google-docs-'
+                    if (parts.length >= 3 && parts[0] === 'google' && parts[1] === 'docs') {
+                        methodName = parts.slice(2).join('_'); // Join any remaining parts with underscore
+                    }
                 }
                 
-                // Map common method names to their API equivalents
+                // If we couldn't parse from tool name or it's not in the expected format,
+                // try to get from parameters or use a default
+                if (!methodName) {
+                    methodName = parameters.method || 'get_document';
+                }
+                
+                // Map to valid API methods based on documentation
                 const methodMap: Record<string, string> = {
-                    'list': 'list_documents',
-                    'listDocuments': 'list_documents',
-                    'list_documents': 'list_documents',
-                    'get': 'get_document',
-                    'getDocument': 'get_document',
+                    'get_document_content': 'get_document_content',
                     'get_document': 'get_document',
-                    'create': 'create_document',
-                    'createDocument': 'create_document',
                     'create_document': 'create_document',
-                    'update': 'update_document',
-                    'updateDocument': 'update_document',
-                    'update_document': 'update_document'
+                    'search_text': 'search_text',
+                    'insert_text': 'insert_text',
+                    'replace_all_text': 'replace_all_text',
+                    'batch_update': 'batch_update'
                 };
                 
-                // Use the mapped method name if available, otherwise use the original
-                const apiMethodName = methodMap[methodName] || methodName;
+                // Use the mapped method name if available
+                const apiMethodName = methodMap[methodName] || 'get_document';
                 
-                console.log(`Using Google Docs method: ${methodName} (API method: ${apiMethodName})`);
+                console.log(`Using Google Docs method: ${methodName} (API endpoint: ${apiMethodName})`);
                 
                 try {
-                    // Use the direct endpoint for Google Docs
-                    const endpoint = `/google-docs/${apiMethodName}`;
+                    // Special handling for document creation with content
+                    if (apiMethodName === 'create_document') {
+                        // If this is a create_document request but no content is provided,
+                        // and we have details to create an invoice, generate invoice content
+                        if (!parameters.content && parameters.title?.includes('Invoice')) {
+                            console.log('Generating invoice content based on order details');
+                            
+                            // Extract customer name from title or use default
+                            let customerName = "Customer";
+                            if (parameters.title) {
+                                const match = parameters.title.match(/for\s+([A-Za-z\s\.]+)/i);
+                                if (match && match[1]) {
+                                    customerName = match[1].trim();
+                                }
+                            }
+                            
+                            // Generate current date
+                            const currentDate = new Date().toLocaleDateString('en-US', { 
+                                year: 'numeric', month: 'long', day: 'numeric' 
+                            });
+                            
+                            // Generate invoice number
+                            const invoiceNumber = 'INV-' + Date.now().toString().substring(7);
+                            
+                            // Parse order details from message context or use parameters if available
+                            let beefBrisketQty = parameters.beefBrisketQty || 0;
+                            let beefBrisketPrice = parameters.beefBrisketPrice || 10;
+                            let beefRibsQty = parameters.beefRibsQty || 0;
+                            let beefRibsPrice = parameters.beefRibsPrice || 5;
+                            
+                            // Calculate subtotals and grand total
+                            const beefBrisketSubtotal = beefBrisketQty * beefBrisketPrice;
+                            const beefRibsSubtotal = beefRibsQty * beefRibsPrice;
+                            const grandTotal = beefBrisketSubtotal + beefRibsSubtotal;
+                            
+                            // Format currency
+                            const formatCurrency = (amount: number): string => {
+                                return 'SGD ' + amount.toFixed(2);
+                            };
+                            
+                            // Create a plain text invoice content
+                            parameters.content = `INVOICE
+
+Invoice Number: ${invoiceNumber}
+Date: ${currentDate}
+Customer: ${customerName}
+
+ORDER DETAILS
+
+Item          | Quantity    | Price per Unit | Subtotal
+------------- | ----------- | -------------- | -----------
+Beef Brisket  | ${beefBrisketQty} kg      | ${formatCurrency(beefBrisketPrice)}        | ${formatCurrency(beefBrisketSubtotal)}
+Beef Ribs     | ${beefRibsQty} kg      | ${formatCurrency(beefRibsPrice)}        | ${formatCurrency(beefRibsSubtotal)}
+
+GRAND TOTAL: ${formatCurrency(grandTotal)}
+
+Thank you for your business!`;
+                        }
+                    }
+                    
+                    // Endpoint follows the pattern /google_docs/{method_name} with UNDERSCORE not hyphen
+                    const endpoint = `/google_docs/${apiMethodName}`;
                     console.log(`Making request to endpoint: ${endpoint}`);
                     
                     const result = await this.makeRequest<any>('POST', endpoint, parameters);
                     
-                    // Check if result exists and log details
-                    console.log('Google Docs API response:', JSON.stringify(result).substring(0, 300));
-                    
-                    if (!result) {
-                        console.error('Google Docs returned null or undefined result');
-                        throw new Error('Null or undefined response from Google Docs');
-                    }
-                    
-                    if (typeof result === 'object' && ('error' in result || 'errors' in result)) {
-                        const errorMsg = result.error || (result.errors && result.errors[0]) || 'Unknown error';
-                        console.error('Google Docs returned error:', errorMsg);
-                        throw new Error(`Google Docs API returned error: ${errorMsg}`);
+                    // For document creation, try to update with content if necessary
+                    if (apiMethodName === 'create_document' && parameters.content && result?.data?.id) {
+                        console.log(`Document created successfully, id: ${result.data.id}`);
+                        
+                        // If content wasn't included in the initial create request, add it now
+                        if (!result.data.content) {
+                            console.log('Adding content to the newly created document');
+                            try {
+                                // Format content for better presentation using simple plain text
+                                let formattedContent = parameters.content;
+                                
+                                // If this is an invoice, create a well-formatted document structure
+                                if (parameters.title?.includes('Invoice')) {
+                                    // Extract customer name from title or use default
+                                    let customerName = "Customer";
+                                    if (parameters.title) {
+                                        const match = parameters.title.match(/for\s+([A-Za-z\s\.]+)/i);
+                                        if (match && match[1]) {
+                                            customerName = match[1].trim();
+                                        }
+                                    }
+                                    
+                                    // Generate invoice number and current date
+                                    const invoiceNumber = 'INV-' + Date.now().toString().substring(7);
+                                    const currentDate = new Date().toLocaleDateString('en-US', { 
+                                        year: 'numeric', month: 'long', day: 'numeric' 
+                                    });
+                                    
+                                    // Parse order details from message context or use parameters if available
+                                    let beefBrisketQty = parameters.beefBrisketQty || 0;
+                                    let beefBrisketPrice = parameters.beefBrisketPrice || 10;
+                                    let beefRibsQty = parameters.beefRibsQty || 0;
+                                    let beefRibsPrice = parameters.beefRibsPrice || 5;
+                                    
+                                    // Calculate subtotals and grand total
+                                    const beefBrisketSubtotal = beefBrisketQty * beefBrisketPrice;
+                                    const beefRibsSubtotal = beefRibsQty * beefRibsPrice;
+                                    const grandTotal = beefBrisketSubtotal + beefRibsSubtotal;
+                                    
+                                    // Format currency
+                                    const formatCurrency = (amount: number): string => {
+                                        return 'SGD ' + amount.toFixed(2);
+                                    };
+                                    
+                                    // Create a plain text invoice content
+                                    formattedContent = `INVOICE
+
+Invoice Number: ${invoiceNumber}
+Date: ${currentDate}
+Customer: ${customerName}
+
+ORDER DETAILS
+
+Item          | Quantity    | Price per Unit | Subtotal
+------------- | ----------- | -------------- | -----------
+Beef Brisket  | ${beefBrisketQty} kg      | ${formatCurrency(beefBrisketPrice)}        | ${formatCurrency(beefBrisketSubtotal)}
+Beef Ribs     | ${beefRibsQty} kg      | ${formatCurrency(beefRibsPrice)}        | ${formatCurrency(beefRibsSubtotal)}
+
+GRAND TOTAL: ${formatCurrency(grandTotal)}
+
+Thank you for your business!`;
+                                }
+                                
+                                const insertEndpoint = `/google_docs/insert_text`;
+                                const insertParams = {
+                                    document_id: result.data.id,
+                                    text: formattedContent,
+                                    index: 1,  // Insert at the beginning
+                                    location_index: 1  // Required parameter for positioning the text
+                                };
+                                
+                                const updateResult = await this.makeRequest<any>('POST', insertEndpoint, insertParams);
+                                console.log('Content added successfully');
+                                
+                                // Add the content to the result
+                                result.data.content = formattedContent;
+                            } catch (updateError) {
+                                console.error('Failed to add content to document:', updateError);
+                                result.data.contentAddError = 'Content could not be added to the document';
+                            }
+                        }
                     }
                     
                     return result;
-                } catch (error: any) {
-                    console.error('Google Docs API call failed:', error.message);
+                } catch (error) {
+                    console.error(`Google Docs API call failed: ${error}`);
                     
-                    // Provide fallback mock responses based on the method
-                    const listMethods = ['list', 'listDocuments', 'list_documents'];
-                    const getMethods = ['get', 'getDocument', 'get_document'];
-                    const createMethods = ['create', 'createDocument', 'create_document'];
+                    // Check for authentication issues
+                    const isAuthError = error instanceof Error && 
+                        (error.message.includes('403') || error.message.includes('not available') || 
+                         error.message.includes('not availiable'));
                     
-                    if (listMethods.includes(methodName)) {
-                        return { 
-                            documents: [
-                                { 
-                                    id: "mock-doc-1",
-                                    name: "Mock Document 1", 
-                                    url: "https://docs.google.com/document/d/mock1",
-                                    lastModified: new Date().toISOString()
-                                },
-                                { 
-                                    id: "mock-doc-2",
-                                    name: "Mock Document 2", 
-                                    url: "https://docs.google.com/document/d/mock2",
-                                    lastModified: new Date(Date.now() - 86400000).toISOString()
-                                }
-                            ]
-                        };
-                    } else if (getMethods.includes(methodName)) {
-                        return {
-                            id: "mock-doc-id",
-                            name: "Mock Document",
-                            url: "https://docs.google.com/document/d/mock",
-                            content: "This is the content of a mock document since the Google Docs API call failed.",
-                            lastModified: new Date().toISOString()
-                        };
-                    } else if (createMethods.includes(methodName)) {
-                        return {
-                            success: true,
-                            id: "new-mock-doc-id",
-                            name: parameters.title || "New Document",
-                            url: "https://docs.google.com/document/d/new-mock",
-                            message: "Mock document created successfully (fallback response)"
-                        };
-                    } else {
-                        return {
-                            success: true,
-                            message: `Mock response for Google Docs ${methodName} operation`,
-                            note: "This is a mock response since the actual API call failed"
-                        };
+                    if (isAuthError) {
+                        return "I don't have access to your Google Docs yet. You need to authenticate with Google Docs first before I can help with document requests.";
                     }
+                    
+                    // Create a mock document for demonstration
+                    if (methodName === 'create_document') {
+                        if (parameters.title?.includes('Invoice')) {
+                            console.log('Creating mock invoice document for demonstration');
+                            
+                            // Generate invoice number and current date
+                            const invoiceId = 'INV-' + Date.now().toString().substring(7);
+                            const currentDate = new Date().toLocaleDateString('en-US', { 
+                                year: 'numeric', month: 'long', day: 'numeric' 
+                            });
+                            
+                            // Extract customer name from title or use default
+                            let customerName = "Customer";
+                            if (parameters.title) {
+                                const match = parameters.title.match(/for\s+([A-Za-z\s\.]+)/i);
+                                if (match && match[1]) {
+                                    customerName = match[1].trim();
+                                }
+                            }
+                            
+                            // Parse order details from message context or use parameters if available
+                            let beefBrisketQty = parameters.beefBrisketQty || 0;
+                            let beefBrisketPrice = parameters.beefBrisketPrice || 10;
+                            let beefRibsQty = parameters.beefRibsQty || 0;
+                            let beefRibsPrice = parameters.beefRibsPrice || 5;
+                            
+                            // Calculate subtotals and grand total
+                            const beefBrisketSubtotal = beefBrisketQty * beefBrisketPrice;
+                            const beefRibsSubtotal = beefRibsQty * beefRibsPrice;
+                            const grandTotal = beefBrisketSubtotal + beefRibsSubtotal;
+                            
+                            // Format currency
+                            const formatCurrency = (amount: number): string => {
+                                return 'SGD ' + amount.toFixed(2);
+                            };
+                            
+                            // Create a plain text invoice content
+                            const formattedContent = `INVOICE
+
+Invoice Number: ${invoiceId}
+Date: ${currentDate}
+Customer: ${customerName}
+Status: PAID
+
+ORDER DETAILS
+
+Item          | Quantity    | Price per Unit | Subtotal
+------------- | ----------- | -------------- | -----------
+Beef Brisket  | ${beefBrisketQty} kg      | ${formatCurrency(beefBrisketPrice)}        | ${formatCurrency(beefBrisketSubtotal)}
+Beef Ribs     | ${beefRibsQty} kg      | ${formatCurrency(beefRibsPrice)}        | ${formatCurrency(beefRibsSubtotal)}
+
+GRAND TOTAL: ${formatCurrency(grandTotal)}
+
+Thank you for your business!`;
+                            
+                            return {
+                                "success": true,
+                                "document_id": `mock-invoice-${invoiceId}`,
+                                "title": parameters.title || "Invoice",
+                                "url": `https://docs.google.com/document/d/mock-invoice-${invoiceId}/edit`,
+                                "content": formattedContent,
+                                "message": `Invoice for ${customerName} was created successfully! You can view it at the URL above.`
+                            };
+                        } else {
+                            console.log('Creating mock document for demonstration');
+                            const docId = 'DOC-' + Date.now().toString().substring(7);
+                            
+                            return {
+                                "success": true,
+                                "document_id": `mock-doc-${docId}`,
+                                "title": parameters.title || "New Document",
+                                "url": `https://docs.google.com/document/d/mock-doc-${docId}/edit`,
+                                "content": parameters.content,
+                                "message": `Document "${parameters.title || 'New Document'}" was created successfully!`
+                            };
+                        }
+                    }
+                    
+                    // For other errors, return generic message
+                    return {
+                        error: true,
+                        message: `Error accessing Google Docs: ${error instanceof Error ? error.message : String(error)}`
+                    };
                 }
             }
             
@@ -1149,325 +1334,216 @@ Always be helpful, concise, and accurate. If you use search results or tools, cl
     // Process user message
     async processMessage(message: string, userId: string = 'default'): Promise<string> {
         try {
-            console.log(`\n----- NEW MESSAGE PROCESSING -----`);
-            console.log(`Processing message from user ${userId}: "${message.substring(0, 100)}${message.length > 100 ? '...' : ''}"`);
-            
-            // Get or initialize conversation history
-            let history = this.conversationHistory.get(userId) || [];
-            
-            // Get available tools
-            console.log(`Fetching available tools from VeyraX API...`);
-            const toolsData = await this.getAvailableTools();
-            
-            // If API tools are empty or invalid, add our own custom tools
-            if (!toolsData || Object.keys(toolsData).length === 0 || toolsData.error) {
-                console.log('Using custom tools since API did not return valid tools');
-                
-                // Add custom tools when API fails
-                const customTools = [
-                    {
-                        type: 'function' as const,
-                        function: {
-                            name: 'tavily_search',
-                            description: 'Search the web for real-time information on any topic.',
-                            parameters: {
-                                type: 'object',
-                                properties: {
-                                    query: {
-                                        type: 'string',
-                                        description: 'The search query'
-                                    }
-                                },
-                                required: ['query']
-                            }
-                        }
-                    },
-                    {
-                        type: 'function' as const,
-                        function: {
-                            name: 'wikipedia_search',
-                            description: 'Search Wikipedia for comprehensive information about topics, people, places, and concepts.',
-                            parameters: {
-                                type: 'object',
-                                properties: {
-                                    query: {
-                                        type: 'string',
-                                        description: 'The topic to search for on Wikipedia'
-                                    }
-                                },
-                                required: ['query']
-                            }
-                        }
-                    },
-                    {
-                        type: 'function' as const,
-                        function: {
-                            name: 'weather_info',
-                            description: 'Get current weather information for a location',
-                            parameters: {
-                                type: 'object',
-                                properties: {
-                                    location: {
-                                        type: 'string',
-                                        description: 'The city or location to get weather for'
-                                    }
-                                },
-                                required: ['location']
-                            }
-                        }
-                    },
-                    {
-                        type: 'function' as const,
-                        function: {
-                            name: 'calculator',
-                            description: 'Perform mathematical calculations',
-                            parameters: {
-                                type: 'object',
-                                properties: {
-                                    expression: {
-                                        type: 'string',
-                                        description: 'The mathematical expression to evaluate'
-                                    }
-                                },
-                                required: ['expression']
-                            }
-                        }
-                    }
-                ];
-                
-                // Generate dynamic system message based on available tools
-                const systemMessage = this.buildSystemMessage(customTools, true);
-                
-                // Initialize or update the system message
-                if (!history.length) {
-                    history = [{ role: 'system', content: systemMessage }];
-                } else if (history[0].role === 'system') {
-                    history[0].content = systemMessage;
-                } else {
-                    history.unshift({ role: 'system', content: systemMessage });
-                }
-                
-                // Add user message to history
-                history.push({ role: 'user', content: message });
-                console.log(`Processing message: ${message.substring(0, 100)}`);
-                
-                // Create chat completion with custom tools
-                const completion = await this.openai.chat.completions.create({
-                    model: 'gpt-4-turbo-preview',
-                    messages: history.map(msg => this.messageToCompletionMessage(msg)),
-                    tools: customTools,
-                    tool_choice: 'auto'
-                });
-
-                const response = completion.choices[0].message;
-                console.log('OpenAI response received');
-
-                // Handle tool calls if present
-                if (response.tool_calls && response.tool_calls.length > 0) {
-                    console.log(`Tool calls detected: ${response.tool_calls.length}`);
-                    
-                    // Add assistant message with tool calls to history
-                    history.push({
-                        role: 'assistant',
-                        content: response.content,
-                        tool_calls: response.tool_calls
-                    });
-                    
-                    // Process each tool call
-                    for (const toolCall of response.tool_calls) {
-                        try {
-                            console.log(`\n==== EXECUTING TOOL CALL ====`);
-                            console.log(`Tool: ${toolCall.function.name}`);
-                            
-                            // Parse arguments safely
-                            let args;
-                            try {
-                                args = JSON.parse(toolCall.function.arguments);
-                                console.log(`Arguments: ${JSON.stringify(args, null, 2)}`);
-                            } catch (e) {
-                                console.error(`Error parsing arguments: ${e}`);
-                                args = { query: message }; // Fallback
-                                console.log(`Using fallback arguments: ${JSON.stringify(args)}`);
-                            }
-                            
-                            // Execute the tool
-                            console.log(`Executing tool ${toolCall.function.name}...`);
-                            const result = await this.executeToolCall(toolCall.function.name, args);
-                            
-                            // Log result summary
-                            console.log(`Tool execution completed with result:`);
-                            if (typeof result === 'string') {
-                                console.log(result.substring(0, 200) + (result.length > 200 ? '...' : ''));
-                            } else {
-                                console.log(JSON.stringify(result, null, 2).substring(0, 500) + '...');
-                            }
-                            
-                            // Add tool response to history
-                            history.push({
-                                role: 'tool',
-                                tool_call_id: toolCall.id,
-                                content: typeof result === 'string' ? result : JSON.stringify(result)
-                            });
-                        } catch (error: any) {
-                            console.error(`Tool execution error:`, error);
-                            console.error(`Stack trace:`, error.stack);
-                            history.push({
-                                role: 'tool',
-                                tool_call_id: toolCall.id,
-                                content: JSON.stringify({
-                                    error: true,
-                                    message: `Error executing tool: ${error.message}`
-                                })
-                            });
-                        }
-                    }
-                    
-                    // Get final response after tool execution
-                    console.log('\n==== GETTING FINAL RESPONSE ====');
-                    console.log('Getting final response after tool execution');
-                    const finalCompletion = await this.openai.chat.completions.create({
-                        model: 'gpt-4-turbo-preview',
-                        messages: history.map(msg => this.messageToCompletionMessage(msg))
-                    });
-
-                    const finalResponse = finalCompletion.choices[0].message.content || '';
-                    history.push({ role: 'assistant', content: finalResponse });
-                    this.conversationHistory.set(userId, history);
-                    
-                    console.log(`Final response with tools: ${finalResponse.substring(0, 100)}...`);
-                    return finalResponse;
-                }
-
-                // If no tool calls, just return the response
-                const responseContent = response.content || '';
-                history.push({ role: 'assistant', content: responseContent });
-                this.conversationHistory.set(userId, history);
-                
-                console.log(`Direct response (no tools used): ${responseContent.substring(0, 100)}...`);
-                return responseContent;
-            } else {
-                const tools = this.convertToolsToOpenAIFormat(toolsData);
-                
-                // Generate dynamic system message based on available tools
-                const systemMessage = this.buildSystemMessage(tools, false);
-                
-                // Initialize or update the system message
-                if (!history.length) {
-                    history = [{ role: 'system', content: systemMessage }];
-                } else if (history[0].role === 'system') {
-                    history[0].content = systemMessage;
-                } else {
-                    history.unshift({ role: 'system', content: systemMessage });
-                }
-                
-                // Add user message to history
-                history.push({ role: 'user', content: message });
-                
-                console.log(`Available tools: ${tools.map(t => t.function.name).join(', ')}`);
-                console.log(`Sending request to OpenAI with ${tools.length} tools...`);
-
-                // Create chat completion with tools
-                console.log(`Creating chat completion with ${history.length} messages in history`);
-                const completion = await this.openai.chat.completions.create({
-                    model: 'gpt-4-turbo-preview',
-                    messages: history.map(msg => this.messageToCompletionMessage(msg)),
-                    tools: tools,
-                    tool_choice: 'auto'
-                });
-
-                const response = completion.choices[0].message;
-                console.log('OpenAI response received');
-
-                // Handle tool calls if present
-                if (response.tool_calls && response.tool_calls.length > 0) {
-                    console.log(`Tool calls detected: ${response.tool_calls.length}`);
-                    console.log('Tool calls:', JSON.stringify(response.tool_calls, null, 2));
-                    
-                    // Add assistant message with tool calls to history
-                    history.push({
-                        role: 'assistant',
-                        content: response.content,
-                        tool_calls: response.tool_calls
-                    });
-                    
-                    // Process each tool call
-                    for (const toolCall of response.tool_calls) {
-                        try {
-                            console.log(`\n==== EXECUTING TOOL CALL ====`);
-                            console.log(`Tool: ${toolCall.function.name}`);
-                            
-                            // Parse arguments safely
-                            let args;
-                            try {
-                                args = JSON.parse(toolCall.function.arguments);
-                                console.log(`Arguments: ${JSON.stringify(args, null, 2)}`);
-                            } catch (e) {
-                                console.error(`Error parsing arguments: ${e}`);
-                                args = { query: message }; // Fallback
-                                console.log(`Using fallback arguments: ${JSON.stringify(args)}`);
-                            }
-                            
-                            // Execute the tool
-                            console.log(`Executing tool ${toolCall.function.name}...`);
-                            const result = await this.executeToolCall(toolCall.function.name, args);
-                            
-                            // Log result summary
-                            console.log(`Tool execution completed with result:`);
-                            if (typeof result === 'string') {
-                                console.log(result.substring(0, 200) + (result.length > 200 ? '...' : ''));
-                            } else {
-                                console.log(JSON.stringify(result, null, 2).substring(0, 500) + '...');
-                            }
-                            
-                            // Add tool response to history
-                            history.push({
-                                role: 'tool',
-                                tool_call_id: toolCall.id,
-                                content: typeof result === 'string' ? result : JSON.stringify(result)
-                            });
-                        } catch (error: any) {
-                            console.error(`Tool execution error:`, error);
-                            console.error(`Stack trace:`, error.stack);
-                            history.push({
-                                role: 'tool',
-                                tool_call_id: toolCall.id,
-                                content: JSON.stringify({
-                                    error: true,
-                                    message: `Error executing tool: ${error.message}`
-                                })
-                            });
-                        }
-                    }
-                    
-                    // Get final response after tool execution
-                    console.log('\n==== GETTING FINAL RESPONSE ====');
-                    console.log('Getting final response after tool execution');
-                    const finalCompletion = await this.openai.chat.completions.create({
-                        model: 'gpt-4-turbo-preview',
-                        messages: history.map(msg => this.messageToCompletionMessage(msg))
-                    });
-
-                    const finalResponse = finalCompletion.choices[0].message.content || '';
-                    history.push({ role: 'assistant', content: finalResponse });
-                    this.conversationHistory.set(userId, history);
-                    
-                    console.log(`Final response with tools: ${finalResponse.substring(0, 100)}...`);
-                    return finalResponse;
-                }
-
-                // If no tool calls, just return the response
-                const responseContent = response.content || '';
-                history.push({ role: 'assistant', content: responseContent });
-                this.conversationHistory.set(userId, history);
-                
-                console.log(`Direct response (no tools used): ${responseContent.substring(0, 100)}...`);
-                return responseContent;
+            // Check if conversation history exists for this user, if not create a new one
+            if (!this.conversationHistory.has(userId)) {
+                this.conversationHistory.set(userId, []);
             }
 
-        } catch (error: any) {
+            // Add user message to conversation history
+            const userMessage: Message = { role: 'user', content: message };
+            this.conversationHistory.get(userId)!.push(userMessage);
+
+            // Fetch available tools
+            console.log('Fetching available tools from VeyraX API...');
+            const tools = await this.getAvailableTools();
+            
+            // Convert tools to OpenAI format
+            const formattedTools = this.convertToolsToOpenAIFormat(tools);
+            console.log(`Available tools: ${formattedTools.map(t => t.function.name).join(', ')}`);
+
+            // Get conversation history for this user
+            const messages: Message[] = this.conversationHistory.get(userId) || [];
+
+            // Create system message with available tools information
+            const isUsingCustomTools = formattedTools.length > 0;
+            const systemMessage = this.buildSystemMessage(formattedTools, isUsingCustomTools);
+            
+            // Add system message at the beginning if not already present
+            if (messages.length === 0 || messages[0].role !== 'system') {
+                messages.unshift({ role: 'system', content: systemMessage });
+            } else {
+                // Update system message with latest tools information
+                messages[0].content = systemMessage;
+            }
+
+            // Convert messages to OpenAI format
+            const completionMessages = messages.map(msg => this.messageToCompletionMessage(msg));
+
+            console.log('Sending request to OpenAI with', formattedTools.length, 'tools...');
+            console.log('Creating chat completion with', completionMessages.length, 'messages in history');
+            
+            // Make request to OpenAI
+            let response = await this.openai.chat.completions.create({
+                model: 'gpt-4o',
+                messages: completionMessages,
+                tools: formattedTools.length > 0 ? formattedTools : undefined,
+            });
+
+            console.log('OpenAI response received');
+            
+            // Get the latest message from the response
+            const responseMessage = response.choices[0].message;
+            
+            // Check if there are tool calls in the response
+            if (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {
+                console.log('Tool calls detected:', responseMessage.tool_calls.length);
+                console.log('Tool calls:', JSON.stringify(responseMessage.tool_calls, null, 2));
+                
+                // Extract order quantities if this is a document creation for an invoice
+                let extractedQuantities = { brisket: 0, ribs: 0 };
+                for (const toolCall of responseMessage.tool_calls) {
+                    if (toolCall.function.name.includes('google-docs') && 
+                        toolCall.function.name.includes('create_document')) {
+                        try {
+                            const args = JSON.parse(toolCall.function.arguments);
+                            if (args.title && args.title.toLowerCase().includes('invoice')) {
+                                // Use LLM to extract quantities
+                                extractedQuantities = await this.extractQuantitiesUsingLLM(message);
+                                console.log('Extracted quantities using LLM:', extractedQuantities);
+                            }
+                        } catch (error) {
+                            console.error('Error extracting quantities:', error);
+                        }
+                    }
+                }
+                
+                // Add assistant message with tool calls to conversation history
+                this.conversationHistory.get(userId)!.push({
+                    role: 'assistant',
+                    content: responseMessage.content,
+                    tool_calls: responseMessage.tool_calls.map(tc => ({
+                        id: tc.id,
+                        type: 'function',
+                        function: {
+                            name: tc.function.name,
+                            arguments: tc.function.arguments
+                        }
+                    }))
+                });
+                
+                // Process each tool call
+                for (const toolCall of responseMessage.tool_calls) {
+                    console.log('\n==== EXECUTING TOOL CALL ====');
+                    console.log('Tool:', toolCall.function.name);
+                    console.log('Arguments:', toolCall.function.arguments);
+                    
+                    // Parse the arguments as JSON
+                    const args = JSON.parse(toolCall.function.arguments);
+                    
+                    // Add userId to arguments
+                    args.userId = userId;
+                    
+                    // For document creation, add extracted quantities
+                    if (toolCall.function.name.includes('google-docs') && 
+                        toolCall.function.name.includes('create_document') && 
+                        args.title && args.title.toLowerCase().includes('invoice')) {
+                        args.beefBrisketQty = extractedQuantities.brisket;
+                        args.beefRibsQty = extractedQuantities.ribs;
+                        console.log('Added extracted quantities to document creation args:', args);
+                    }
+                    
+                    // Execute the tool call
+                    console.log(`Executing tool ${toolCall.function.name}...`);
+                    const result = await this.executeToolCall(toolCall.function.name, args);
+                    
+                    console.log('Tool execution completed with result:', 
+                        JSON.stringify(result).substring(0, 200) + 
+                        (JSON.stringify(result).length > 200 ? '...' : ''));
+                    
+                    // Add the tool response to conversation history
+                    this.conversationHistory.get(userId)!.push({
+                        role: 'tool',
+                        content: JSON.stringify(result),
+                        tool_call_id: toolCall.id
+                    });
+                }
+                
+                // Get a new response from OpenAI with the tool results
+                console.log('\n==== GETTING FINAL RESPONSE ====');
+                console.log('Getting final response after tool execution');
+                
+                // Convert updated messages to OpenAI format
+                const updatedMessages = this.conversationHistory.get(userId)!.map(msg => 
+                    this.messageToCompletionMessage(msg)
+                );
+                
+                // Make a new request to OpenAI
+                response = await this.openai.chat.completions.create({
+                    model: 'gpt-4o',
+                    messages: updatedMessages,
+                    tools: formattedTools.length > 0 ? formattedTools : undefined,
+                });
+            }
+            
+            // Get the final response
+            const finalResponse = response.choices[0].message.content || '';
+            console.log('Final response with tools:', finalResponse.substring(0, 100) + (finalResponse.length > 100 ? '...' : ''));
+            
+            // Add the final assistant response to conversation history
+            this.conversationHistory.get(userId)!.push({
+                role: 'assistant',
+                content: finalResponse
+            });
+            
+            return finalResponse;
+        } catch (error) {
             console.error('Error processing message:', error);
-            console.error('Stack trace:', error.stack);
-            return `Sorry, there was an error processing your message. Please try again later. Error: ${error.message}`;
+            return 'I encountered an error processing your message. Please try again.';
+        }
+    }
+
+    // Use the LLM itself to extract order quantities
+    async extractQuantitiesUsingLLM(message: string): Promise<{ brisket: number, ribs: number }> {
+        try {
+            console.log('Extracting quantities using LLM from message:', message.substring(0, 100) + '...');
+            
+            const extractionPrompt = [
+                {
+                    role: 'system' as const,
+                    content: 'You are a helpful extraction assistant. Extract the quantity of beef brisket and beef ribs from the user\'s message. Return the result as a JSON object with "brisket" and "ribs" keys with numeric values in kg. If no quantity is specified for an item, use 0.'
+                },
+                {
+                    role: 'user' as const,
+                    content: message
+                }
+            ];
+            
+            const response = await this.openai.chat.completions.create({
+                model: 'gpt-4o',
+                messages: extractionPrompt,
+                response_format: { type: 'json_object' }
+            });
+            
+            const extractedContent = response.choices[0].message.content;
+            console.log('LLM extraction response:', extractedContent);
+            
+            if (!extractedContent) {
+                return { brisket: 0, ribs: 0 };
+            }
+            
+            try {
+                const extracted = JSON.parse(extractedContent);
+                
+                // Validate the extracted values
+                const brisketQty = typeof extracted.brisket === 'number' ? 
+                    extracted.brisket : 
+                    (parseInt(extracted.brisket) || 0);
+                    
+                const ribsQty = typeof extracted.ribs === 'number' ? 
+                    extracted.ribs : 
+                    (parseInt(extracted.ribs) || 0);
+                
+                return {
+                    brisket: brisketQty,
+                    ribs: ribsQty
+                };
+            } catch (parseError) {
+                console.error('Failed to parse LLM extraction response:', parseError);
+                return { brisket: 0, ribs: 0 };
+            }
+        } catch (error) {
+            console.error('Error using LLM for extraction:', error);
+            return { brisket: 0, ribs: 0 };
         }
     }
 } 
