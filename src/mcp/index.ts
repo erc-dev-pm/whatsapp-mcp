@@ -109,18 +109,62 @@ export class MCPClient {
             }
 
             const data = await response.json() as VeyraXToolsResponse;
+            const tools: Tool[] = [];
             
             // Transform the tools into a flat list with tool.method format
-            this.tools = Object.entries(data.tools).flatMap(([toolName, tool]) => 
-                Object.entries(tool.methods).map(([methodName, method]) => ({
-                    name: `${toolName}.${methodName}`,
-                    method: methodName,
-                    description: this.getMethodDescription(toolName, methodName),
-                    parameters: this.formatParameterSchema(method.parameters)
-                }))
-            );
+            Object.entries(data.tools || {}).forEach(([toolName, tool]) => {
+                // Check if the tool has methods under a "methods" property or directly as properties
+                const hasMethods = Object.prototype.hasOwnProperty.call(tool, 'methods');
+                let methods: Record<string, any> = {};
+                
+                if (hasMethods) {
+                    // Tool follows the expected format with "methods" property
+                    methods = tool.methods || {};
+                } else {
+                    // Tool has methods as direct properties (like mail tool)
+                    // Identify methods by looking for function objects
+                    methods = Object.entries(tool)
+                        .filter(([_, value]: [string, any]) => 
+                            typeof value === 'object' && 
+                            value !== null && 
+                            (value.type === 'function' || (value.function && typeof value.function === 'object'))
+                        )
+                        .reduce((acc, [key, value]) => {
+                            acc[key] = value;
+                            return acc;
+                        }, {} as Record<string, any>);
+                }
+                
+                Object.entries(methods).forEach(([methodName, methodData]) => {
+                    try {
+                        // Extract parameters from the correct location based on structure
+                        let params: Record<string, any> = {};
+                        
+                        if (methodData.parameters) {
+                            // Direct parameters structure
+                            params = methodData.parameters;
+                        } else if (methodData.function && methodData.function.parameters) {
+                            // Nested function parameters
+                            params = methodData.function.parameters;
+                        } else if (methodData.function && methodData.function.function && methodData.function.function.parameters) {
+                            // Deeply nested function parameters (seen in some tools)
+                            params = methodData.function.function.parameters;
+                        }
+                        
+                        tools.push({
+                            name: `${toolName}.${methodName}`,
+                            method: methodName,
+                            description: this.getMethodDescription(toolName, methodName),
+                            parameters: this.formatParameterSchema(params)
+                        });
+                    } catch (error) {
+                        console.error(`Error parsing parameters for ${toolName}.${methodName}:`, error);
+                    }
+                });
+            });
 
-            console.log(`Fetched ${this.tools.length} tools:`, this.tools);
+            this.tools = tools;
+            console.log(`Fetched ${this.tools.length} tools:`, this.tools.map(t => t.name).join(', '));
             return this.tools;
         } catch (error) {
             console.error('Error fetching tools:', error);
@@ -198,20 +242,53 @@ export class MCPClient {
 
             const tools = await this.getAvailableTools();
 
+            // Get unique tool categories from available tools
+            const toolCategories = new Set<string>();
+            tools.forEach(tool => {
+                const [category] = tool.name.split('.');
+                toolCategories.add(category);
+            });
+
+            // Generate a dynamic system message based on actual available tools
+            let systemContent = `You are a helpful WhatsApp assistant with access to these tools:\n\n`;
+            
+            // List available tool categories
+            [...toolCategories].forEach((category, index) => {
+                let displayName = category;
+                let description = '';
+                
+                // Format nice display names for common tools
+                if (category === 'gmail') {
+                    displayName = 'Gmail';
+                    description = 'Send emails and manage your inbox';
+                } else if (category === 'google-calendar') {
+                    displayName = 'Google Calendar';
+                    description = 'Manage your calendar events and schedules';
+                } else if (category === 'google-docs') {
+                    displayName = 'Google Docs';
+                    description = 'Create and manage documents';
+                } else if (category === 'tavily') {
+                    displayName = 'Tavily';
+                    description = 'Search the web for information';
+                } else {
+                    // Capitalize and format other tool names
+                    displayName = category.split('-')
+                        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+                        .join(' ');
+                    description = `Use ${displayName} services`;
+                }
+                
+                systemContent += `${index + 1}. ${displayName} - ${description}\n`;
+            });
+            
+            systemContent += `\nWhen a user asks for something that requires using these tools, use the appropriate tool to help them. Format responses concisely for WhatsApp.\n\n`;
+            systemContent += `Available tools: ${tools.map(t => t.name).join(', ')}`;
+            
             console.log('Sending message to OpenAI with tools...');
             const messages: ChatCompletionMessageParam[] = [
                 this.messageToCompletionMessage({
                     role: 'system',
-                    content: `You are a helpful WhatsApp assistant with access to various tools:
-
-1. Gmail - Send emails and manage your inbox
-2. Google Calendar - Manage your calendar events and schedules
-3. Google Docs - Create and manage documents
-4. Tavily - Search the web for information
-
-When a user asks for something that requires using these tools, use the appropriate tool to help them. Format responses concisely for WhatsApp.
-
-Available tools: ${tools.map(t => t.name).join(', ')}`
+                    content: systemContent
                 }),
                 ...history.map(msg => this.messageToCompletionMessage(msg))
             ];
@@ -284,4 +361,4 @@ Available tools: ${tools.map(t => t.name).join(', ')}`
             return 'Sorry, there was an error processing your message.';
         }
     }
-} 
+}
