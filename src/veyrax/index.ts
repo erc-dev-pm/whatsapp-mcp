@@ -388,36 +388,182 @@ export class VeyraXClient {
         console.log(`Processing message for user ${userId}: ${message.substring(0, 100)}...`);
         
         try {
-            // Add direct handling for document-related requests
+            // First, use OpenAI to understand the full context of the request
+            // This gives us information we can use across all request paths
+            let contextData = {
+                is_document_related: false,
+                is_calendar_related: false,
+                is_email_related: false, 
+                is_search_related: false,
+                is_order_related: false,
+                email_recipients: [] as string[],
+                whatsapp_recipients: [] as string[],
+                message_content: '',
+                subject: '',
+                context_details: {} as Record<string, any>
+            };
+
+            // Use OpenAI to extract intent and context before proceeding with specialized handlers
+            if (this.openai) {
+                try {
+                    console.log('Using OpenAI to extract intent and context from user message');
+                    
+                    const contextCompletion = await this.openai.chat.completions.create({
+                        model: 'gpt-4o',
+                        messages: [
+                            {
+                                role: 'system',
+                                content: `Extract the full context and intent from the user message.
+                                
+                                Format your response as a JSON object with these properties:
+                                {
+                                    "is_document_related": boolean, // Creating, editing, or sharing documents
+                                    "is_calendar_related": boolean, // Setting events, checking schedule
+                                    "is_email_related": boolean, // Sending emails
+                                    "is_search_related": boolean, // Looking for information
+                                    "is_order_related": boolean, // Create or track an order, purchase
+                                    "email_recipients": [], // Array of email addresses found
+                                    "whatsapp_recipients": [], // Array of phone numbers with country codes
+                                    "message_content": "", // The main content/body to send
+                                    "subject": "", // Subject line for emails or title for documents
+                                    "context_details": {} // Any other details extracted from context
+                                }
+                                
+                                Notes:
+                                - A message can match multiple categories (e.g., creating a document AND sharing via email)
+                                - Format all phone numbers with country code (e.g., +1234567890)
+                                - For Singapore numbers, use +65 prefix if not specified
+                                - Include only numbers that appear to be contact information, not random numbers
+                                
+                                IMPORTANT: Be thorough and find ALL relevant details. If someone asks to send a confirmation,
+                                look for BOTH email addresses AND phone numbers. Don't assume only one method is requested.
+                                
+                                ONLY respond with the JSON object, nothing else.`
+                            },
+                            {
+                                role: 'user',
+                                content: message
+                            }
+                        ],
+                        response_format: { type: 'json_object' }
+                    });
+                    
+                    const contextResult = contextCompletion.choices[0]?.message.content || '{}';
+                    console.log('OpenAI context extraction result:', contextResult);
+                    
+                    try {
+                        const extractedContext = JSON.parse(contextResult);
+                        contextData = {
+                            ...contextData,
+                            ...extractedContext
+                        };
+                        
+                        console.log('Extracted context:', JSON.stringify(contextData, null, 2));
+                    } catch (parseError) {
+                        console.error('Error parsing OpenAI context result:', parseError);
+                    }
+                } catch (extractionError) {
+                    console.error('Error using OpenAI for context extraction:', extractionError);
+                }
+            }
+            
+            // Now use the context data to determine which path to take
+            // But first set these variables to maintain compatibility with existing code
+            const isDocRelated = contextData.is_document_related;
+            const isCalendarRelated = contextData.is_calendar_related;
+            const isEmailRelated = contextData.is_email_related;
+            const isSearchRelated = contextData.is_search_related;
+            const isOrderDocument = contextData.is_order_related;
+            const emailRecipients = contextData.email_recipients;
+            const whatsappRecipients = contextData.whatsapp_recipients;
+
+            // Legacy keyword detection as fallback
             const docKeywords = ['document', 'doc', 'google doc', 'note', 'write', 'draft', 'text'];
-            const isDocRelated = docKeywords.some(keyword => 
+            const isDocRelatedLegacy = docKeywords.some(keyword => 
                 message.toLowerCase().includes(keyword.toLowerCase())
             );
             
-            // Add direct handling for calendar-related requests
             const calendarKeywords = ['calendar', 'schedule', 'meeting', 'appointment', 'event', 'remind'];
-            const isCalendarRelated = calendarKeywords.some(keyword => 
+            const isCalendarRelatedLegacy = calendarKeywords.some(keyword => 
                 message.toLowerCase().includes(keyword.toLowerCase())
             );
             
-            // Add direct handling for email-related requests
             const emailKeywords = ['email', 'mail', 'gmail', 'send', 'write', 'compose'];
-            const isEmailRelated = emailKeywords.some(keyword => 
+            const isEmailRelatedLegacy = emailKeywords.some(keyword => 
                 message.toLowerCase().includes(keyword.toLowerCase())
             );
             
-            // Add direct handling for search-related requests
             const searchKeywords = ['search', 'find', 'look up', 'google', 'information about', 'what is', 'how to', 'news about', 'latest'];
-            const isSearchRelated = searchKeywords.some(keyword => 
+            const isSearchRelatedLegacy = searchKeywords.some(keyword => 
                 message.toLowerCase().includes(keyword.toLowerCase())
             );
-            const hasQuestionWords = ['what', 'how', 'why', 'when', 'where', 'who', 'which'].some(word => 
-                message.toLowerCase().includes(` ${word} `) || message.toLowerCase().startsWith(`${word} `)
-            );
-            const isLikelySearchQuery = isSearchRelated || (hasQuestionWords && message.length > 15);
+
+            // Use OpenAI detection if available, otherwise fall back to keywords
+            const useDocPath = isDocRelated || isDocRelatedLegacy;
+            const useCalendarPath = isCalendarRelated || isCalendarRelatedLegacy;
+            const useEmailPath = isEmailRelated || isEmailRelatedLegacy;
+            const useSearchPath = isSearchRelated || isSearchRelatedLegacy;
+            
+            // Function to send WhatsApp confirmation - can be used from any path
+            const sendWhatsAppConfirmation = async (
+                recipients: string[], 
+                title: string = 'Your Request', 
+                contentUrl: string = '', 
+                isOrder: boolean = false,
+                customMessage: string = ''
+            ): Promise<any[]> => {
+                if (recipients.length === 0) {
+                    console.log('No WhatsApp recipients found, skipping confirmation');
+                    return [];
+                }
+                
+                console.log(`Sending WhatsApp confirmation to: ${recipients.join(', ')}`);
+                const confirmationResults: any[] = [];
+                
+                for (const recipient of recipients) {
+                    try {
+                        // Format appropriate message based on type and provided content
+                        let whatsappMessage = customMessage;
+                        
+                        if (!whatsappMessage) {
+                            if (isOrder) {
+                                whatsappMessage = `🎉 Order Confirmation: Your order "${title}" has been processed!`;
+                                if (contentUrl) {
+                                    whatsappMessage += ` You can view the details here: ${contentUrl}`;
+                                }
+                            } else {
+                                whatsappMessage = `✅ Confirmation: Your request "${title}" has been completed!`;
+                                if (contentUrl) {
+                                    whatsappMessage += ` Details available here: ${contentUrl}`;
+                                }
+                            }
+                        }
+                        
+                        console.log(`Sending WhatsApp message to ${recipient}: ${whatsappMessage}`);
+                        
+                        // Send WhatsApp message
+                        const whatsappResult = await this.callTool('whatsapp', 'send_message', {
+                            recipient: recipient,
+                            message: whatsappMessage
+                        });
+                        
+                        confirmationResults.push(whatsappResult);
+                        console.log(`Successfully sent WhatsApp confirmation to ${recipient}`);
+                    } catch (whatsappError) {
+                        console.error(`Error sending WhatsApp confirmation to ${recipient}:`, whatsappError);
+                        confirmationResults.push({
+                            error: true,
+                            message: `Failed to send WhatsApp confirmation to ${recipient}`,
+                            details: whatsappError
+                        });
+                    }
+                }
+                
+                return confirmationResults;
+            };
             
             // Handle Google Docs requests
-            if (isDocRelated) {
+            if (useDocPath) {
                 console.log('DETECTED GOOGLE DOCS REQUEST. Will use OpenAI with Google Docs tools specifically.');
                 
                 if (!this.openai) {
@@ -1159,48 +1305,20 @@ IMPORTANT: If you ONLY create a document but don't insert content, the document 
                             
                             // STEP 4: Send WhatsApp confirmation if phone numbers were found
                             if (whatsappRecipients.length > 0 && documentUrl) {
-                                console.log(`Sending WhatsApp confirmation for document to: ${whatsappRecipients.join(', ')}`);
+                                const whatsappResults = await sendWhatsAppConfirmation(
+                                    whatsappRecipients, 
+                                    documentTitle, 
+                                    documentUrl, 
+                                    isOrderDocument
+                                );
                                 
-                                // Determine if this is an order confirmation
-                                // Use the OpenAI-detected order status instead of keyword matching
-                                const isOrder = isOrderDocument;
-                                
-                                for (const recipient of whatsappRecipients) {
-                                    try {
-                                        // Format appropriate message based on document type
-                                        let whatsappMessage = '';
-                                        
-                                        if (isOrder) {
-                                            whatsappMessage = `🎉 Order Confirmation: Your order "${documentTitle}" has been created successfully! You can view the details here: ${documentUrl}`;
-                                        } else {
-                                            whatsappMessage = `📄 Document Notification: I've created a document titled "${documentTitle}" as requested. You can access it here: ${documentUrl}`;
-                                        }
-                                        
-                                        console.log(`Sending WhatsApp message to ${recipient}: ${whatsappMessage}`);
-                                        
-                                        // Send WhatsApp message
-                                        const whatsappResult = await this.callTool('whatsapp', 'send_message', {
-                                            recipient: recipient,
-                                            message: whatsappMessage
-                                        });
-                                        
-                                        // Add to results and messages
-                                        toolResults.push(whatsappResult);
-                                        
-                                        const whatsappNotification: ChatCompletionSystemMessageParam = {
-                                            role: 'system',
-                                            content: `I've sent a WhatsApp confirmation to ${recipient} with the ${isOrder ? 'order' : 'document'} details.`
-                                        };
-                                        messagesForCompletion.push(whatsappNotification);
-                                        
-                                        console.log(`Successfully sent WhatsApp confirmation to ${recipient}`);
-                                    } catch (whatsappError) {
-                                        console.error(`Error sending WhatsApp confirmation to ${recipient}:`, whatsappError);
-                                        messagesForCompletion.push({
-                                            role: 'system',
-                                            content: `I was unable to send a WhatsApp confirmation to ${recipient}. Please advise the user to check the document link directly: ${documentUrl}`
-                                        } as ChatCompletionSystemMessageParam);
-                                    }
+                                // Add WhatsApp confirmation results to the messages for completion
+                                if (whatsappResults.length > 0) {
+                                    const whatsappNotification: ChatCompletionSystemMessageParam = {
+                                        role: 'system',
+                                        content: `I've sent a WhatsApp confirmation to ${whatsappRecipients.join(', ')} with the ${isOrderDocument ? 'order' : 'document'} details.`
+                                    };
+                                    messagesForCompletion.push(whatsappNotification);
                                 }
                             }
                         }
@@ -1275,7 +1393,7 @@ IMPORTANT: If you ONLY create a document but don't insert content, the document 
             }
             
             // Handle Google Calendar requests
-            if (isCalendarRelated) {
+            if (useCalendarPath) {
                 console.log('DETECTED CALENDAR REQUEST. Will use OpenAI with Google Calendar tools specifically.');
                 
                 if (!this.openai) {
@@ -1452,7 +1570,7 @@ IMPORTANT: If you ONLY create a document but don't insert content, the document 
                 }
             }
             
-            if (isLikelySearchQuery) {
+            if (useSearchPath) {
                 console.log('DETECTED SEARCH REQUEST. Will use OpenAI with tavily search tool specifically.');
                 
                 // Force OpenAI to handle search explicitly
@@ -1668,19 +1786,18 @@ IMPORTANT: Always include the DATE of the information in your response.`
                 }
             }
             
-            if (isEmailRelated) {
+            if (useEmailPath) {
                 console.log('DETECTED EMAIL REQUEST. Will use OpenAI with mail tools specifically.');
                 
-                // Force OpenAI to handle email explicitly
                 if (!this.openai) {
-                    console.warn('OpenAI client not available but email request detected. Please check your API key configuration.');
-                    return "I'd like to help you with your email request, but there seems to be an issue with my configuration. Please contact the administrator.";
+                    console.warn('OpenAI client not available but email request detected.');
+                    return "I'd like to help you with your email request, but there seems to be an issue with my configuration.";
                 }
                 
                 console.log('Using OpenAI to process email message...');
                 
                 try {
-                    // First, fetch available tools but only use mail tools
+                    // Fetch available tools but only use email tools
                     const toolsResponse = await fetch(`${this.baseUrl}/get-tools`, {
                         method: 'GET',
                         headers: {
@@ -1696,7 +1813,7 @@ IMPORTANT: Always include the DATE of the information in your response.`
                     const toolsData = await toolsResponse.json() as any;
                     const availableTools = toolsData.tools || {};
                     
-                    // Only extract mail tools for email handling (looking for both mail and gmail tools)
+                    // Extract email tools
                     const emailTools: Array<{
                         type: 'function';
                         function: {
@@ -1706,37 +1823,26 @@ IMPORTANT: Always include the DATE of the information in your response.`
                         };
                     }> = [];
                     
-                    // Check for the mail tool first (which has send_message method)
-                    if (availableTools.mail) {
-                        console.log('Found mail tool for email handling');
-                        const toolData = this.formatToolForOpenAI('mail', availableTools.mail);
+                    if (availableTools['mail']) {
+                        console.log('Found mail tools');
+                        const toolData = this.formatToolForOpenAI('mail', availableTools['mail']);
                         emailTools.push(...toolData);
                     }
                     
-                    // Also check for gmail tool as a fallback
-                    if (availableTools.gmail) {
-                        console.log('Found gmail tool for email handling');
-                        const toolData = this.formatToolForOpenAI('gmail', availableTools.gmail);
+                    if (availableTools['gmail']) {
+                        console.log('Found Gmail tools');
+                        const toolData = this.formatToolForOpenAI('gmail', availableTools['gmail']);
                         emailTools.push(...toolData);
                     }
                     
                     if (emailTools.length === 0) {
-                        console.error('No email tools found (neither mail nor gmail)');
-                        return "I'd like to help you with your email, but I don't seem to have access to the necessary email tools right now.";
+                        console.error('No email tools found');
+                        return "I'd like to help you with your email, but I don't seem to have access to email tools right now.";
                     }
                     
-                    console.log(`Found ${emailTools.length} email-related tools for handling email request`);
+                    console.log(`Found ${emailTools.length} email tools for handling email request`);
                     
-                    // ADDED DETAILED LOGGING of the tools being sent to OpenAI
-                    console.log('=== TOOLS BEING SENT TO OPENAI FOR EMAIL ===');
-                    emailTools.forEach((tool, index) => {
-                        console.log(`Tool ${index + 1}: ${tool.function.name}`);
-                        console.log('Description:', tool.function.description);
-                        console.log('Parameters:', JSON.stringify(tool.function.parameters, null, 2));
-                    });
-                    console.log('=== END TOOLS LIST ===');
-                    
-                    // Create chat completion specifically for email handling
+                    // Use OpenAI to create an email
                     const completion = await this.openai.chat.completions.create({
                         model: 'gpt-4o',
                         messages: [
@@ -1794,6 +1900,10 @@ IMPORTANT: Always include the DATE of the information in your response.`
                     }
                     console.log('=== END RESPONSE DETAILS ===');
                     
+                    // Extract subject from the email for WhatsApp confirmation
+                    let emailSubject = '';
+                    let emailSent = false;
+                    
                     if (response.tool_calls && response.tool_calls.length > 0) {
                         // We have a tool call, execute it
                         console.log('OpenAI suggested email tool call:', JSON.stringify(response.tool_calls));
@@ -1805,10 +1915,16 @@ IMPORTANT: Always include the DATE of the information in your response.`
                         const methodName = nameParts.slice(1).join('_');
                         const args = JSON.parse(toolCall.function.arguments);
                         
+                        // Extract the subject for WhatsApp confirmation
+                        if (args.subject) {
+                            emailSubject = args.subject;
+                        }
+                        
                         console.log(`Executing email tool: ${toolName}.${methodName} with args:`, args);
                         
                         // Call the tool
                         const toolResult = await this.callTool(toolName, methodName, args);
+                        emailSent = true;
                         
                         // Get a follow-up response from OpenAI with the tool result
                         const followUpCompletion = await this.openai.chat.completions.create({
@@ -1818,7 +1934,9 @@ IMPORTANT: Always include the DATE of the information in your response.`
                                     role: 'system',
                                     content: `You are an assistant focused on helping with emails.
                                         You have just executed an email-related tool call and received the result.
-                                        Format your response in a natural conversational way.`
+                                        Format your response in a natural conversational way.
+                                        
+                                        If WhatsApp confirmations were also sent, mention this in your response.`
                                 },
                                 { role: 'user', content: message },
                                 response,
@@ -1830,9 +1948,29 @@ IMPORTANT: Always include the DATE of the information in your response.`
                             ]
                         });
                         
-                        const finalResponse = followUpCompletion.choices[0]?.message.content || "I sent that email for you.";
-                        return finalResponse;
+                        // Send WhatsApp confirmation if required and email was sent
+                        if (emailSent && whatsappRecipients.length > 0) {
+                            console.log('Sending WhatsApp confirmation for email');
+                            const customMessage = `📧 Email Confirmation: I've sent an email with subject "${emailSubject}" to ${emailRecipients.join(', ')}`;
+                            await sendWhatsAppConfirmation(whatsappRecipients, emailSubject, '', isOrderDocument, customMessage);
+                            
+                            // Add this information to final response
+                            const whatsAppInfo = `I've also sent a confirmation via WhatsApp to ${whatsappRecipients.join(', ')}.`;
+                            const finalResponse = followUpCompletion.choices[0]?.message.content + "\n\n" + whatsAppInfo;
+                            return finalResponse;
+                        } else {
+                            const finalResponse = followUpCompletion.choices[0]?.message.content || "I sent that email for you.";
+                            return finalResponse;
+                        }
                     } else if (response.content) {
+                        // No tool call, check if we should still send WhatsApp confirmation
+                        if (whatsappRecipients.length > 0 && contextData.is_email_related) {
+                            const customMessage = `📱 Message: ${contextData.message_content || "I've processed your request."}`;
+                            await sendWhatsAppConfirmation(whatsappRecipients, "Your Request", "", isOrderDocument, customMessage);
+                            
+                            // Add this information to the response
+                            return response.content + "\n\nI've also sent a confirmation via WhatsApp to " + whatsappRecipients.join(', ') + ".";
+                        }
                         // No tool call, just return the response content
                         return response.content;
                     }
