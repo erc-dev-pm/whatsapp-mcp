@@ -546,6 +546,7 @@ IMPORTANT: If you ONLY create a document but don't insert content, the document 
                         let documentTitle = '';
                         let documentUrl = '';
                         let emailRecipients: string[] = [];
+                        let whatsappRecipients: string[] = [];
                         
                         // Extract email recipients from the user message if present
                         const emailRegex = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g;
@@ -553,6 +554,29 @@ IMPORTANT: If you ONLY create a document but don't insert content, the document 
                         if (emailsInMessage) {
                             emailRecipients = emailsInMessage;
                             console.log(`Found email recipients in message: ${emailRecipients.join(', ')}`);
+                        }
+                        
+                        // Extract WhatsApp numbers from the user message
+                        // Look for phone numbers in various formats
+                        // +1234567890, 1234567890, 123-456-7890, etc.
+                        const phoneRegex = /(?:\+\d{1,3}[-\s]?)?\(?\d{3}\)?[-\s]?\d{3}[-\s]?\d{4}\b/g;
+                        const numbersInMessage = message.match(phoneRegex);
+                        if (numbersInMessage) {
+                            // Format numbers to standard format (remove spaces, dashes, etc.)
+                            whatsappRecipients = numbersInMessage.map(num => {
+                                // Remove non-digits
+                                let cleaned = num.replace(/\D/g, '');
+                                // Ensure number has country code, default to '+65' if none
+                                if (!cleaned.startsWith('65') && cleaned.length === 8) {
+                                    cleaned = '65' + cleaned;
+                                }
+                                // Add + if missing
+                                if (!cleaned.startsWith('+')) {
+                                    cleaned = '+' + cleaned;
+                                }
+                                return cleaned;
+                            });
+                            console.log(`Found WhatsApp recipients in message: ${whatsappRecipients.join(', ')}`);
                         }
                         
                         // Process all tool calls sequentially
@@ -1055,6 +1079,55 @@ IMPORTANT: If you ONLY create a document but don't insert content, the document 
                                         console.log(`Successfully shared document ${documentId} via email (fallback method)`);
                                     } catch (fallbackError) {
                                         console.error('Error using gmail.send_email as fallback:', fallbackError);
+                                    }
+                                }
+                            }
+                            
+                            // STEP 4: Send WhatsApp confirmation if phone numbers were found
+                            if (whatsappRecipients.length > 0 && documentUrl) {
+                                console.log(`Sending WhatsApp confirmation for document to: ${whatsappRecipients.join(', ')}`);
+                                
+                                // Determine if this is an order confirmation
+                                const isOrder = message.toLowerCase().includes('order') || 
+                                              documentTitle.toLowerCase().includes('order') ||
+                                              message.toLowerCase().includes('purchase') ||
+                                              message.toLowerCase().includes('buy');
+                                
+                                for (const recipient of whatsappRecipients) {
+                                    try {
+                                        // Format appropriate message based on document type
+                                        let whatsappMessage = '';
+                                        
+                                        if (isOrder) {
+                                            whatsappMessage = `🎉 Order Confirmation: Your order "${documentTitle}" has been created successfully! You can view the details here: ${documentUrl}`;
+                                        } else {
+                                            whatsappMessage = `📄 Document Notification: I've created a document titled "${documentTitle}" as requested. You can access it here: ${documentUrl}`;
+                                        }
+                                        
+                                        console.log(`Sending WhatsApp message to ${recipient}: ${whatsappMessage}`);
+                                        
+                                        // Send WhatsApp message
+                                        const whatsappResult = await this.callTool('whatsapp', 'send_message', {
+                                            recipient: recipient,
+                                            message: whatsappMessage
+                                        });
+                                        
+                                        // Add to results and messages
+                                        toolResults.push(whatsappResult);
+                                        
+                                        const whatsappNotification: ChatCompletionSystemMessageParam = {
+                                            role: 'system',
+                                            content: `I've sent a WhatsApp confirmation to ${recipient} with the ${isOrder ? 'order' : 'document'} details.`
+                                        };
+                                        messagesForCompletion.push(whatsappNotification);
+                                        
+                                        console.log(`Successfully sent WhatsApp confirmation to ${recipient}`);
+                                    } catch (whatsappError) {
+                                        console.error(`Error sending WhatsApp confirmation to ${recipient}:`, whatsappError);
+                                        messagesForCompletion.push({
+                                            role: 'system',
+                                            content: `I was unable to send a WhatsApp confirmation to ${recipient}. Please advise the user to check the document link directly: ${documentUrl}`
+                                        } as ChatCompletionSystemMessageParam);
                                     }
                                 }
                             }
