@@ -547,6 +547,7 @@ IMPORTANT: If you ONLY create a document but don't insert content, the document 
                         let documentUrl = '';
                         let emailRecipients: string[] = [];
                         let whatsappRecipients: string[] = [];
+                        let isOrderDocument = false;
                         
                         // Extract email recipients from the user message if present
                         const emailRegex = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g;
@@ -556,6 +557,78 @@ IMPORTANT: If you ONLY create a document but don't insert content, the document 
                             console.log(`Found email recipients in message: ${emailRecipients.join(', ')}`);
                         }
                         
+                        // Use OpenAI to extract contact information and intent
+                        try {
+                            console.log('Using OpenAI to extract contact information and intent from user message');
+                            
+                            if (this.openai) {
+                                const extractionCompletion = await this.openai.chat.completions.create({
+                                    model: 'gpt-4o',
+                                    messages: [
+                                        {
+                                            role: 'system',
+                                            content: `Extract the following information from the user message:
+                                            1. Any phone numbers that might be WhatsApp contacts (in international format with + sign)
+                                            2. Whether this appears to be an order-related request
+                                            
+                                            Format your response as a JSON object with these properties:
+                                            {
+                                                "phone_numbers": [], // Array of phone numbers with country codes
+                                                "is_order": true/false, // Whether this is an order-related request
+                                                "order_details": {} // Any relevant order details you can extract
+                                            }
+                                            
+                                            Notes for phone numbers:
+                                            - Format all numbers with country code (e.g., +1234567890)
+                                            - For Singapore numbers, use +65 prefix if not specified
+                                            - Include only numbers that appear to be contact information, not random numbers
+                                            
+                                            Notes for order detection:
+                                            - Look for keywords like order, purchase, buy, payment
+                                            - Consider context - is the user creating an order document or receipt?
+                                            
+                                            ONLY respond with the JSON object, nothing else.`
+                                        },
+                                        {
+                                            role: 'user',
+                                            content: message
+                                        }
+                                    ],
+                                    response_format: { type: 'json_object' }
+                                });
+                                
+                                const extractionResult = extractionCompletion.choices[0]?.message.content || '{}';
+                                console.log('OpenAI extraction result:', extractionResult);
+                                
+                                try {
+                                    const extractedData = JSON.parse(extractionResult);
+                                    
+                                    // Extract phone numbers from OpenAI response
+                                    if (extractedData.phone_numbers && Array.isArray(extractedData.phone_numbers)) {
+                                        whatsappRecipients = extractedData.phone_numbers.filter(num => num && typeof num === 'string');
+                                        console.log(`OpenAI found WhatsApp recipients: ${whatsappRecipients.join(', ')}`);
+                                    }
+                                    
+                                    // Determine if this is an order document
+                                    if (extractedData.is_order === true) {
+                                        isOrderDocument = true;
+                                        console.log('OpenAI identified this as an order-related request');
+                                        
+                                        // We could use order_details for more personalized handling if needed
+                                        if (extractedData.order_details) {
+                                            console.log('Order details:', JSON.stringify(extractedData.order_details));
+                                        }
+                                    }
+                                } catch (parseError) {
+                                    console.error('Error parsing OpenAI extraction result:', parseError);
+                                }
+                            }
+                        } catch (extractionError) {
+                            console.error('Error using OpenAI for information extraction:', extractionError);
+                        }
+                        
+                        // Remove the old regex-based phone number extraction
+                        /*
                         // Extract WhatsApp numbers from the user message
                         // Look for phone numbers in various formats
                         // +1234567890, 1234567890, 123-456-7890, etc.
@@ -578,6 +651,7 @@ IMPORTANT: If you ONLY create a document but don't insert content, the document 
                             });
                             console.log(`Found WhatsApp recipients in message: ${whatsappRecipients.join(', ')}`);
                         }
+                        */
                         
                         // Process all tool calls sequentially
                         const toolResults: any[] = [];
@@ -1088,10 +1162,8 @@ IMPORTANT: If you ONLY create a document but don't insert content, the document 
                                 console.log(`Sending WhatsApp confirmation for document to: ${whatsappRecipients.join(', ')}`);
                                 
                                 // Determine if this is an order confirmation
-                                const isOrder = message.toLowerCase().includes('order') || 
-                                              documentTitle.toLowerCase().includes('order') ||
-                                              message.toLowerCase().includes('purchase') ||
-                                              message.toLowerCase().includes('buy');
+                                // Use the OpenAI-detected order status instead of keyword matching
+                                const isOrder = isOrderDocument;
                                 
                                 for (const recipient of whatsappRecipients) {
                                     try {
