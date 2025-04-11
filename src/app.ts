@@ -43,24 +43,59 @@ async function main() {
             }
         });
 
-        client.on('message', async (message) => {
+        client.on('message', async msg => {
+            // Only ignore messages from self
+            // The bot responds to both direct messages and group chats (messages with @g.us in the from field)
+            if (msg.fromMe) {
+                return;
+            }
+            
+            // Log the message type (group or direct) for debugging
+            const isGroupMessage = msg.from.includes('@g.us');
+            console.log(`Received ${isGroupMessage ? 'GROUP' : 'DIRECT'} message from ${msg.from}: ${msg.body.substring(0, 100)}...`);
+            
             try {
-                // Ignore messages from groups
-                if (message.from.includes('@g.us')) {
+                // Special command to reload tools
+                if (msg.body.toLowerCase().trim() === '/reload' || msg.body.toLowerCase().trim() === '/reload tools') {
+                    console.log('Command received: /reload');
+                    
+                    await msg.reply('🔄 Attempting to reload tools from API...');
+                    try {
+                        // Try the reloadTools method first, then fallback to initializeTools if available
+                        if (typeof veyraxClient.reloadTools === 'function') {
+                            const success = await veyraxClient.reloadTools();
+                            if (success) {
+                                await msg.reply('✅ Tools reloaded successfully!');
+                            } else {
+                                await msg.reply('❌ Failed to reload tools. Please check logs for details.');
+                            }
+                        } else if (typeof veyraxClient.initializeTools === 'function') {
+                            await veyraxClient.initializeTools();
+                            await msg.reply('✅ Tools reloaded successfully!');
+                        } else {
+                            console.error('No tool reload method found in VeyraXClient');
+                            await msg.reply('❌ Tool reloading not supported in this version.');
+                        }
+                    } catch (error) {
+                        console.error('Failed to reload tools:', error);
+                        await msg.reply('❌ Failed to reload tools. Please check logs for details.');
+                    }
                     return;
                 }
 
-                console.log('Received message:', message.body);
+                // Get userId and message content for processing
+                // For group messages, we use the group ID as the userId
+                const userId = msg.from;
+                const messageContent = msg.body;
                 
-                const response = await veyraxClient.processMessage(
-                    message.from,
-                    message.body
-                );
-
-                await message.reply(response);
+                // Process the message with VeyraX
+                const response = await veyraxClient.processMessage(messageContent, userId);
+                console.log(`Sending reply to ${msg.from}: ${response.substring(0, 100)}...`);
+                
+                await msg.reply(response);
             } catch (error) {
                 console.error('Error processing message:', error);
-                await message.reply('Sorry, I encountered an error while processing your message. Please try again.');
+                await msg.reply('Sorry, I encountered an error while processing your message. Please try again.');
             }
         });
 
